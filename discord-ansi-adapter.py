@@ -7,8 +7,9 @@ import colorsys
 DEBUG = False
 
 # https://stackoverflow.com/a/14693789/18696276
+# modified to also capture CSI sequences with ':' separators and 'e'
 ANSI_ESCAPE_8BIT = re.compile(
-    r"((?:\x1B[@-Z\\-_]|[\x80-\x9A\x9C-\x9F]|(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]))"
+    r"((?:\x1B\[|\x9B)[0-9:;?e]*[ -/]*[@-~]|\x1B[@-Z\\-_]|[\x80-\x9A\x9C-\x9F])"
 )
 
 DISCORD_FG_HEX_TO_4BIT_INDEX = {
@@ -180,131 +181,114 @@ def find_closest_discord_color(rgb: list[int], fg_or_bg: str, do_increase_satura
 
 
 def join_sequence(sequence: list[int]) -> str:
+    # use explicit reset sequence for 0
+    if sequence == [0]:
+        return "\x1b[0;0m"
     return "\x1b[" + ";".join([str(x) for x in sequence]) + "m"
 
 
 def process_sequence(sequence: str) -> str:
+    original_sequence = sequence
     sequence = sequence[2:]  # remove '\x1b['
     sequence = sequence[:-1]  # remove 'm'
-    sequence = sequence.split(";")
-    # special case: 0;38:2:x:r:g:b;48:2:x:r:g:b (not sure what x is so I ignore it)
-    if (
-        len(sequence) == 3
-        and sequence[0] == "0"
-        and sequence[1].startswith("38:2:")
-        and sequence[2].startswith("48:2:")
-    ):
-        try:
-            fg_rgb = [int(x) for x in sequence[1].split(":")[-3:]]
-            bg_rgb = [int(x) for x in sequence[2].split(":")[-3:]]
-        except ValueError as e:
-            raise InvalidSequenceError(sequence) from e
-        return "%s%s" % (
-            join_sequence(_process_sequence([38, 2] + fg_rgb)),
-            join_sequence(_process_sequence([48, 2] + bg_rgb)),
-        )
-    # special case: 0;38:2:x:r:g:b (not sure what x is so I ignore it)
-    if len(sequence) == 2 and sequence[0] == "0" and sequence[1].startswith("38:2:"):
-        try:
-            rgb = [int(x) for x in sequence[1].split(":")[-3:]]
-        except ValueError as e:
-            raise InvalidSequenceError(f"failed to cast to int: {sequence}") from e
-        return join_sequence(_process_sequence([38, 2] + rgb))
-    # special case: 0;48:2:x:r:g:b (not sure what x is so I ignore it)
-    if len(sequence) == 2 and sequence[0] == "0" and sequence[1].startswith("48:2:"):
-        try:
-            rgb = [int(x) for x in sequence[1].split(":")[-3:]]
-        except ValueError as e:
-            raise InvalidSequenceError(f"failed to cast to int: {sequence}") from e
-        return join_sequence(_process_sequence([48, 2] + rgb))
-    # cast to int
-    try:
-        sequence = [int(x) for x in sequence]
-    except ValueError:
-        raise InvalidSequenceError(f"failed to cast to int: {sequence}") from e
-    # special case 1;31;41 (4 bit formatting and foreground and background)
-    if (
-        len(sequence) == 3
-        and sequence[1] in VALID_4BIT_INDEXES
-        and sequence[2] in VALID_4BIT_INDEXES
-    ):
-        return "%s%s" % (
-            join_sequence(_process_sequence([sequence[0], sequence[1]])),
-            join_sequence(_process_sequence([sequence[0], sequence[2]])),
-        )
-    # special case: 31 (4 bit color with no leading formatting)
-    if (len(sequence) == 1) and (sequence[0] in VALID_4BIT_INDEXES):
-        return join_sequence(_process_sequence([0, sequence[0]]))
-    # normal case
-    return join_sequence(_process_sequence(sequence))
+    # Use re to split by either ; or :
+    sequence = [x for x in re.split(r"[;:]", sequence) if x is not None]
 
+    # Empty sequence is shorthand for reset
+    if not sequence or (len(sequence) == 1 and sequence[0] == ""):
+        return join_sequence([0])
 
-def _process_sequence(sequence_numbers: list[int]) -> list[int]:
-    # input sequence can be 1, 2, 3, or 5 numbers
-    # output sequence can be 1 or 2 numbers
+    params = []
+    for x in sequence:
+        if x == "e" or x == "":
+            params.append(None)
+        else:
+            try:
+                params.append(int(x))
+            except ValueError as e:
+                raise InvalidSequenceError(f"failed to cast to int: {original_sequence}") from e
 
-    if len(sequence_numbers) == 1:  # 4 bit formatting
-        if sequence_numbers[0] not in SUPPORTED_FORMAT_INDEXES:
-            # can't substitute with 0 because that would reset all formatting
-            raise InvalidSequenceError(f"invalid 1 digit sequence: {sequence_numbers}")
-        return sequence_numbers
+    result_sequences = []
+    i = 0
+    while i < len(params):
+        p = params[i]
+        if p is None or p == 0:
+            result_sequences.append([0])
+            i += 1
+        elif p in [1, 4]:
+            result_sequences.append([p])
+            i += 1
+        elif (30 <= p <= 37) or (90 <= p <= 97):
+            result_sequences.append([0, find_closest_discord_color(
+                hex2rgb(FAKE_4BIT_FG_INDEX_TO_HEX[p]), "foreground"
+            )])
+            i += 1
+        elif (40 <= p <= 47) or (100 <= p <= 107):
+            result_sequences.append([0, find_closest_discord_color(
+                hex2rgb(FAKE_4BIT_BG_INDEX_TO_HEX[p]), "background"
+            )])
+            i += 1
+        elif p in [38, 48]:
+            # Complex color
+            fg_or_bg = "foreground" if p == 38 else "background"
+            if i + 1 >= len(params):
+                raise InvalidSequenceError(f"truncated complex color: {original_sequence}")
 
-    if len(sequence_numbers) == 2:  # 4 bit formatting and color
-        formatting, color_index = sequence_numbers
-        if formatting not in SUPPORTED_FORMAT_INDEXES:
-            # can substitute with 0 because it has no effect when followed with a color
-            print(
-                f"ignoring unsupported 1st number of sequence: {sequence_numbers}",
-                file=sys.stderr,
-            )
-            formatting = 0
-        if color_index in VALID_4BIT_FG_INDEXES:
-            return [
-                formatting,
-                find_closest_discord_color(
-                    hex2rgb(FAKE_4BIT_FG_INDEX_TO_HEX[color_index]), "foreground"
-                ),
-            ]
-        if color_index in VALID_4BIT_BG_INDEXES:
-            return [
-                formatting,
-                find_closest_discord_color(
-                    hex2rgb(FAKE_4BIT_BG_INDEX_TO_HEX[color_index]), "background"
-                ),
-            ]
-        raise InvalidSequenceError(f"invalid 2 digit sequence 2nd num: {sequence_numbers}")
+            mode = params[i+1]
+            if mode == 5: # 8-bit
+                if i + 2 >= len(params):
+                    raise InvalidSequenceError(f"truncated 8-bit color: {original_sequence}")
+                color_index = params[i+2]
+                if color_index is None:
+                     raise InvalidSequenceError(f"invalid 8-bit color index: {original_sequence}")
+                result_sequences.append([find_closest_discord_color(
+                    hex2rgb(FAKE_8BIT_INDEX_TO_HEX[color_index]),
+                    fg_or_bg
+                )])
+                i += 3
+            elif mode == 2: # 24-bit
+                # 38;2;[id];r;g;b
+                # we need to find how many parameters we have.
+                # usually it's 38;2;r;g;b or 38;2;id;r;g;b
+                sub_params = []
+                j = i + 2
+                while j < len(params) and len(sub_params) < 4:
+                    sub_params.append(params[j])
+                    j += 1
 
-    if len(sequence_numbers) == 3:  # 8 bit color
-        if sequence_numbers[0] not in [38, 48]:
-            raise InvalidSequenceError(f"invalid 3 digit sequence 1st num: {sequence_numbers}")
-        if sequence_numbers[1] != 5:
-            raise InvalidSequenceError(f"invalid 3 digit sequence 2nd num: {sequence_numbers}")
-        color_index = sequence_numbers[2]
-        return [
-            find_closest_discord_color(
-                hex2rgb(FAKE_8BIT_INDEX_TO_HEX[color_index]),
-                "foreground" if sequence_numbers[0] == 38 else "background",
-            ),
-        ]
+                if len(sub_params) < 3:
+                     raise InvalidSequenceError(f"truncated 24-bit color: {original_sequence}")
 
-    if len(sequence_numbers) == 5:  # 24 bit color
-        if sequence_numbers[0] not in [38, 48]:
-            raise InvalidSequenceError(f"invalid 5 digit sequence 1st num: {sequence_numbers}")
-        if sequence_numbers[1] != 2:
-            raise InvalidSequenceError(f"invalid 5 digit sequence 2nd num: {sequence_numbers}")
-        return [
-            find_closest_discord_color(
-                sequence_numbers[2:],
-                "foreground" if sequence_numbers[0] == 38 else "background",
-            )
-        ]
+                if len(sub_params) == 4:
+                    # id, r, g, b
+                    rgb = sub_params[1:]
+                    consumed = 4
+                else:
+                    # r, g, b
+                    rgb = sub_params
+                    consumed = 3
 
-    raise InvalidSequenceError(f"sequence length is not 1, 2, 3, or 5: {sequence_numbers}")
+                if any(x is None for x in rgb):
+                     raise InvalidSequenceError(f"missing rgb values in 24-bit color: {original_sequence}")
+
+                result_sequences.append([find_closest_discord_color(rgb, fg_or_bg)])
+                i += 2 + consumed
+            else:
+                raise InvalidSequenceError(f"unsupported color mode {mode}: {original_sequence}")
+        else:
+            # ignore other parameters or handle them as 0?
+            print(f"ignoring unsupported parameter {p}: {original_sequence}", file=sys.stderr)
+            i += 1
+
+    if not result_sequences:
+        return ""
+
+    return "".join(join_sequence(seq) for seq in result_sequences)
 
 
 chunks = re.split(ANSI_ESCAPE_8BIT, sys.stdin.read())
 for chunk in chunks:
-    if (not re.match(ANSI_ESCAPE_8BIT, chunk)) or chunk == "\x1b[m":
+    if (not re.match(ANSI_ESCAPE_8BIT, chunk)):
         print(chunk, end="")
         continue
     try:
