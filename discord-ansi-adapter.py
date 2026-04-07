@@ -180,12 +180,13 @@ def find_closest_discord_color(rgb: list[int], fg_or_bg: str, do_increase_satura
 
 
 def join_sequence(sequence: list[int]) -> str:
-    return "\x1b[" + ";".join([str(x) for x in sequence]) + "m"
+    return "".join(["\x1b[" + str(x) + "m" for x in sequence])
 
 
 def process_sequence(sequence: str) -> str:
-    sequence = sequence[2:]  # remove '\x1b['
-    sequence = sequence[:-1]  # remove 'm'
+    sequence = sequence[2:-1]  # remove '\x1b[' and 'm'
+    if not sequence:
+        return join_sequence([0])
     sequence = sequence.split(";")
     # special case: 0;38:2:x:r:g:b;48:2:x:r:g:b (not sure what x is so I ignore it)
     if (
@@ -244,6 +245,8 @@ def _process_sequence(sequence_numbers: list[int]) -> list[int]:
     # output sequence can be 1 or 2 numbers
 
     if len(sequence_numbers) == 1:  # 4 bit formatting
+        if sequence_numbers[0] == 0:
+            return [0, 0]
         if sequence_numbers[0] not in SUPPORTED_FORMAT_INDEXES:
             # can't substitute with 0 because that would reset all formatting
             raise InvalidSequenceError(f"invalid 1 digit sequence: {sequence_numbers}")
@@ -304,7 +307,7 @@ def _process_sequence(sequence_numbers: list[int]) -> list[int]:
 
 chunks = re.split(ANSI_ESCAPE_8BIT, sys.stdin.read())
 for chunk in chunks:
-    if (not re.match(ANSI_ESCAPE_8BIT, chunk)) or chunk == "\x1b[m":
+    if not re.match(ANSI_ESCAPE_8BIT, chunk):
         print(chunk, end="")
         continue
     try:
