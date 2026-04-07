@@ -185,8 +185,6 @@ def join_sequence(sequence: list[int]) -> str:
 
 def process_sequence(sequence: str) -> str:
     sequence = sequence[2:-1]  # remove '\x1b[' and 'm'
-    if not sequence:
-        return join_sequence([0])
     sequence = sequence.split(";")
     # special case: 0;38:2:x:r:g:b;48:2:x:r:g:b (not sure what x is so I ignore it)
     if (
@@ -207,21 +205,21 @@ def process_sequence(sequence: str) -> str:
     # special case: 0;38:2:x:r:g:b (not sure what x is so I ignore it)
     if len(sequence) == 2 and sequence[0] == "0" and sequence[1].startswith("38:2:"):
         try:
-            rgb = [int(x) for x in sequence[1].split(":")[-3:]]
+            rgb = [int(x or "0") for x in sequence[1].split(":")[-3:]]
         except ValueError as e:
             raise InvalidSequenceError(f"failed to cast to int: {sequence}") from e
         return join_sequence(_process_sequence([38, 2] + rgb))
     # special case: 0;48:2:x:r:g:b (not sure what x is so I ignore it)
     if len(sequence) == 2 and sequence[0] == "0" and sequence[1].startswith("48:2:"):
         try:
-            rgb = [int(x) for x in sequence[1].split(":")[-3:]]
+            rgb = [int(x or "0") for x in sequence[1].split(":")[-3:]]
         except ValueError as e:
             raise InvalidSequenceError(f"failed to cast to int: {sequence}") from e
         return join_sequence(_process_sequence([48, 2] + rgb))
     # cast to int
     try:
-        sequence = [int(x) for x in sequence]
-    except ValueError:
+        sequence = [int(x or "0") for x in sequence]
+    except ValueError as e:
         raise InvalidSequenceError(f"failed to cast to int: {sequence}") from e
     # special case 1;31;41 (4 bit formatting and foreground and background)
     if (
@@ -245,8 +243,6 @@ def _process_sequence(sequence_numbers: list[int]) -> list[int]:
     # output sequence can be 1 or 2 numbers
 
     if len(sequence_numbers) == 1:  # 4 bit formatting
-        if sequence_numbers[0] == 0:
-            return [0]
         if sequence_numbers[0] not in SUPPORTED_FORMAT_INDEXES:
             # can't substitute with 0 because that would reset all formatting
             raise InvalidSequenceError(f"invalid 1 digit sequence: {sequence_numbers}")
