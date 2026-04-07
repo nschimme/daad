@@ -186,6 +186,9 @@ def join_sequence(sequence: list[int]) -> str:
 def process_sequence(sequence: str) -> str:
     sequence = sequence[2:-1]  # remove '\x1b[' and 'm'
     sequence = sequence.split(";")
+    # According to ECMA-48, an empty parameter is treated as if it were 0.
+    # This correctly handles \x1b[m as \x1b[0m.
+
     # special case: 0;38:2:x:r:g:b;48:2:x:r:g:b (not sure what x is so I ignore it)
     if (
         len(sequence) == 3
@@ -194,8 +197,8 @@ def process_sequence(sequence: str) -> str:
         and sequence[2].startswith("48:2:")
     ):
         try:
-            fg_rgb = [int(x) for x in sequence[1].split(":")[-3:]]
-            bg_rgb = [int(x) for x in sequence[2].split(":")[-3:]]
+            fg_rgb = [int(x or "0") for x in sequence[1].split(":")[-3:]]
+            bg_rgb = [int(x or "0") for x in sequence[2].split(":")[-3:]]
         except ValueError as e:
             raise InvalidSequenceError(sequence) from e
         return "%s%s" % (
@@ -303,6 +306,10 @@ def _process_sequence(sequence_numbers: list[int]) -> list[int]:
 
 chunks = re.split(ANSI_ESCAPE_8BIT, sys.stdin.read())
 for chunk in chunks:
+    # If it's not an ANSI escape sequence, print it as is.
+    # Note that we no longer skip \x1b[m (shorthand reset) because
+    # Discord doesn't handle it well, so we let process_sequence
+    # normalize it to \x1b[0m.
     if not re.match(ANSI_ESCAPE_8BIT, chunk):
         print(chunk, end="")
         continue
