@@ -184,9 +184,11 @@ def join_sequence(sequence: list[int]) -> str:
 
 
 def process_sequence(sequence: str) -> str:
-    sequence = sequence[2:]  # remove '\x1b['
-    sequence = sequence[:-1]  # remove 'm'
+    sequence = sequence[2:-1]  # remove '\x1b[' and 'm'
     sequence = sequence.split(";")
+    # According to ECMA-48, an empty parameter is treated as if it were 0.
+    # This correctly handles \x1b[m as \x1b[0m.
+
     # special case: 0;38:2:x:r:g:b;48:2:x:r:g:b (not sure what x is so I ignore it)
     if (
         len(sequence) == 3
@@ -195,8 +197,8 @@ def process_sequence(sequence: str) -> str:
         and sequence[2].startswith("48:2:")
     ):
         try:
-            fg_rgb = [int(x) for x in sequence[1].split(":")[-3:]]
-            bg_rgb = [int(x) for x in sequence[2].split(":")[-3:]]
+            fg_rgb = [int(x or "0") for x in sequence[1].split(":")[-3:]]
+            bg_rgb = [int(x or "0") for x in sequence[2].split(":")[-3:]]
         except ValueError as e:
             raise InvalidSequenceError(sequence) from e
         return "%s%s" % (
@@ -206,21 +208,21 @@ def process_sequence(sequence: str) -> str:
     # special case: 0;38:2:x:r:g:b (not sure what x is so I ignore it)
     if len(sequence) == 2 and sequence[0] == "0" and sequence[1].startswith("38:2:"):
         try:
-            rgb = [int(x) for x in sequence[1].split(":")[-3:]]
+            rgb = [int(x or "0") for x in sequence[1].split(":")[-3:]]
         except ValueError as e:
             raise InvalidSequenceError(f"failed to cast to int: {sequence}") from e
         return join_sequence(_process_sequence([38, 2] + rgb))
     # special case: 0;48:2:x:r:g:b (not sure what x is so I ignore it)
     if len(sequence) == 2 and sequence[0] == "0" and sequence[1].startswith("48:2:"):
         try:
-            rgb = [int(x) for x in sequence[1].split(":")[-3:]]
+            rgb = [int(x or "0") for x in sequence[1].split(":")[-3:]]
         except ValueError as e:
             raise InvalidSequenceError(f"failed to cast to int: {sequence}") from e
         return join_sequence(_process_sequence([48, 2] + rgb))
     # cast to int
     try:
-        sequence = [int(x) for x in sequence]
-    except ValueError:
+        sequence = [int(x or "0") for x in sequence]
+    except ValueError as e:
         raise InvalidSequenceError(f"failed to cast to int: {sequence}") from e
     # special case 1;31;41 (4 bit formatting and foreground and background)
     if (
@@ -304,7 +306,11 @@ def _process_sequence(sequence_numbers: list[int]) -> list[int]:
 
 chunks = re.split(ANSI_ESCAPE_8BIT, sys.stdin.read())
 for chunk in chunks:
-    if (not re.match(ANSI_ESCAPE_8BIT, chunk)) or chunk == "\x1b[m":
+    # If it's not an ANSI escape sequence, print it as is.
+    # Note that we no longer skip \x1b[m (shorthand reset) because
+    # Discord doesn't handle it well, so we let process_sequence
+    # normalize it to \x1b[0m.
+    if not re.match(ANSI_ESCAPE_8BIT, chunk):
         print(chunk, end="")
         continue
     try:
